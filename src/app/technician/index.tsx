@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
-
 import {
+  ActivityIndicator,
   Alert,
   RefreshControl,
   ScrollView,
@@ -9,10 +9,9 @@ import {
   TouchableOpacity,
   View,
 } from "react-native";
-
 import * as ImagePicker from "expo-image-picker";
 import { File } from "expo-file-system";
-
+import NotificationBell from "../../components/NotificationBell";
 import { supabase } from "../../lib/supabase";
 
 type Assignment = {
@@ -51,24 +50,17 @@ type Technician = {
 
 export default function TechnicianDashboard() {
   const [user, setUser] = useState<any>(null);
-
   const [technician, setTechnician] =
     useState<Technician | null>(null);
-
   const [assignments, setAssignments] =
     useState<Assignment[]>([]);
-
   const [requests, setRequests] =
     useState<Record<string, ServiceRequest>>({});
-
   const [loading, setLoading] = useState(true);
-
   const [refreshing, setRefreshing] =
     useState(false);
-
   const [uploadingId, setUploadingId] =
     useState<string | null>(null);
-
   const [workingId, setWorkingId] =
     useState<string | null>(null);
 
@@ -86,11 +78,11 @@ export default function TechnicianDashboard() {
 
       const {
         data: { user: currentUser },
-        error: userError,
+        error,
       } = await supabase.auth.getUser();
 
-      if (userError) {
-        throw userError;
+      if (error) {
+        throw error;
       }
 
       if (!currentUser) {
@@ -110,7 +102,7 @@ export default function TechnicianDashboard() {
 
       Alert.alert(
         "Error",
-        error.message ||
+        error?.message ||
           "Unable to load dashboard."
       );
     } finally {
@@ -128,12 +120,7 @@ export default function TechnicianDashboard() {
       .single();
 
     if (error) {
-      console.error(
-        "TECHNICIAN LOAD ERROR:",
-        error
-      );
-
-      throw new Error(error.message);
+      throw error;
     }
 
     setTechnician(data);
@@ -147,32 +134,22 @@ export default function TechnicianDashboard() {
     technicianId: string
   ) {
     const {
-      data: assignmentData,
-      error: assignmentError,
+      data,
+      error,
     } = await supabase
       .from("assignments")
       .select("*")
-      .eq(
-        "technician_id",
-        technicianId
-      )
+      .eq("technician_id", technicianId)
       .order("assigned_at", {
         ascending: false,
       });
 
-    if (assignmentError) {
-      console.error(
-        "ASSIGNMENT LOAD ERROR:",
-        assignmentError
-      );
-
-      throw new Error(
-        assignmentError.message
-      );
+    if (error) {
+      throw error;
     }
 
     const assignmentList =
-      assignmentData || [];
+      (data || []) as Assignment[];
 
     setAssignments(assignmentList);
 
@@ -184,9 +161,7 @@ export default function TechnicianDashboard() {
     const requestIds = [
       ...new Set(
         assignmentList.map(
-          (
-            assignment: Assignment
-          ) =>
+          (assignment) =>
             assignment.service_request_id
         )
       ),
@@ -201,14 +176,7 @@ export default function TechnicianDashboard() {
       .in("id", requestIds);
 
     if (requestError) {
-      console.error(
-        "REQUEST LOAD ERROR:",
-        requestError
-      );
-
-      throw new Error(
-        requestError.message
-      );
+      throw requestError;
     }
 
     const requestMap: Record<
@@ -216,12 +184,10 @@ export default function TechnicianDashboard() {
       ServiceRequest
     > = {};
 
-    (requestData || []).forEach(
-      (request: ServiceRequest) => {
-        requestMap[request.id] =
-          request;
-      }
-    );
+    for (const request of requestData || []) {
+      requestMap[request.id] =
+        request as ServiceRequest;
+    }
 
     setRequests(requestMap);
   }
@@ -241,30 +207,11 @@ export default function TechnicianDashboard() {
           table: "assignments",
           filter: `technician_id=eq.${technicianId}`,
         },
-        async (payload) => {
-          console.log(
-            "ASSIGNMENT REALTIME:",
-            payload
-          );
-
-          try {
-            await loadAssignments(
-              technicianId
-            );
-          } catch (error) {
-            console.error(
-              "REALTIME REFRESH ERROR:",
-              error
-            );
-          }
+        () => {
+          loadAssignments(technicianId);
         }
       )
-      .subscribe((status) => {
-        console.log(
-          "Technician realtime status:",
-          status
-        );
-      });
+      .subscribe();
 
     return channel;
   }
@@ -276,14 +223,13 @@ export default function TechnicianDashboard() {
 
     try {
       setRefreshing(true);
-
       await loadAssignments(
         technician.id
       );
     } catch (error: any) {
       Alert.alert(
         "Error",
-        error.message ||
+        error?.message ||
           "Unable to refresh."
       );
     } finally {
@@ -339,9 +285,8 @@ export default function TechnicianDashboard() {
             assignment.service_request_id,
           technician_id:
             technician?.id,
-          action:
-            "TECHNICIAN_ACCEPTED",
-          description:
+          log_type: "NOTE",
+          message:
             "Technician accepted the service assignment.",
           created_by: user?.id,
         });
@@ -362,7 +307,7 @@ export default function TechnicianDashboard() {
 
       Alert.alert(
         "Error",
-        error.message ||
+        error?.message ||
           "Unable to accept assignment."
       );
     } finally {
@@ -375,61 +320,47 @@ export default function TechnicianDashboard() {
   ) {
     Alert.alert(
       "Reject Assignment",
-      "Are you sure you want to reject this assignment?",
+      "Are you sure you want to reject this assignment? The system will automatically find the next-best available technician.",
       [
         {
           text: "Cancel",
           style: "cancel",
         },
         {
-          text: "Reject",
+          text: "Reject & Reassign",
           style: "destructive",
-
           onPress: async () => {
             try {
-              setWorkingId(
-                assignment.id
-              );
+              setWorkingId(assignment.id);
 
-              const { error } =
-                await supabase
-                  .from("assignments")
-                  .update({
-                    status: "REJECTED",
-                    rejection_reason:
-                      "Technician rejected the assignment.",
-                  })
-                  .eq(
-                    "id",
-                    assignment.id
-                  )
-                  .eq(
-                    "technician_id",
-                    technician?.id
-                  );
+              const {
+                data,
+                error,
+              } = await supabase.rpc(
+                "reject_and_reassign_service_request",
+                {
+                  assignment_id_input:
+                    assignment.id,
+                }
+              );
 
               if (error) {
                 throw error;
               }
 
-              await supabase
-                .from("service_logs")
-                .insert({
-                  service_request_id:
-                    assignment.service_request_id,
-                  technician_id:
-                    technician?.id,
-                  action:
-                    "TECHNICIAN_REJECTED",
-                  description:
-                    "Technician rejected the service assignment.",
-                  created_by:
-                    user?.id,
-                });
+              const result = data?.[0];
+
+              if (!result) {
+                throw new Error(
+                  "The assignment was rejected, but no replacement technician was returned."
+                );
+              }
 
               Alert.alert(
-                "Rejected",
-                "The assignment has been rejected."
+                "Reassigned",
+                `${result.technician_name} has been assigned as the next-best technician.\n\nMatch Score: ${Number(
+                  result.match_score
+                ).toFixed(0)}`
               );
 
               await loadAssignments(
@@ -437,14 +368,18 @@ export default function TechnicianDashboard() {
               );
             } catch (error: any) {
               console.error(
-                "REJECT ERROR:",
+                "REJECT/REASSIGN ERROR:",
                 error
               );
 
               Alert.alert(
-                "Error",
-                error.message ||
-                  "Unable to reject assignment."
+                "Reassignment Failed",
+                error?.message ||
+                  "Unable to reject and reassign the service request."
+              );
+
+              await loadAssignments(
+                technician!.id
               );
             } finally {
               setWorkingId(null);
@@ -503,9 +438,9 @@ export default function TechnicianDashboard() {
             assignment.service_request_id,
           technician_id:
             technician?.id,
-          action: "WORK_STARTED",
-          description:
-            "Technician started work on the service request.",
+          log_type: "NOTE",
+          message:
+            "Technician started work on the service assignment.",
           created_by: user?.id,
         });
 
@@ -518,14 +453,9 @@ export default function TechnicianDashboard() {
         technician!.id
       );
     } catch (error: any) {
-      console.error(
-        "START WORK ERROR:",
-        error
-      );
-
       Alert.alert(
         "Error",
-        error.message ||
+        error?.message ||
           "Unable to start work."
       );
     } finally {
@@ -537,9 +467,7 @@ export default function TechnicianDashboard() {
     assignment: Assignment
   ) {
     try {
-      setUploadingId(
-        assignment.id
-      );
+      setUploadingId(assignment.id);
 
       const permission =
         await ImagePicker.requestMediaLibraryPermissionsAsync();
@@ -566,76 +494,31 @@ export default function TechnicianDashboard() {
 
       if (
         result.canceled ||
-        !result.assets ||
-        result.assets.length === 0
+        !result.assets?.length
       ) {
-        console.log(
-          "IMAGE PICKER: User cancelled."
-        );
-
         return;
       }
 
-      const selectedImage =
-        result.assets[0];
+      const image = result.assets[0];
 
-      console.log(
-        "SELECTED IMAGE:",
-        {
-          uri: selectedImage.uri,
-          fileName:
-            selectedImage.fileName,
-          mimeType:
-            selectedImage.mimeType,
-          width: selectedImage.width,
-          height: selectedImage.height,
-        }
-      );
-
-      if (!selectedImage.uri) {
+      if (!image.uri) {
         throw new Error(
           "Selected image does not have a URI."
         );
       }
 
-      /*
-       * Read the local file directly
-       * using Expo FileSystem.
-       *
-       * Do NOT use fetch(file://...)
-       * here because that caused the
-       * previous HTTP 404 problem.
-       */
-      const imageFile =
-        new File(
-          selectedImage.uri
-        );
+      const file = new File(image.uri);
 
-      const fileInfo =
-        imageFile.info();
-
-      console.log(
-        "LOCAL FILE INFO:",
-        fileInfo
-      );
-
-      if (!imageFile.exists) {
+      if (!file.exists) {
         throw new Error(
           "Selected image file does not exist."
         );
       }
 
       const arrayBuffer =
-        await imageFile.arrayBuffer();
+        await file.arrayBuffer();
 
-      console.log(
-        "IMAGE ARRAYBUFFER SIZE:",
-        arrayBuffer.byteLength
-      );
-
-      if (
-        arrayBuffer.byteLength === 0
-      ) {
+      if (!arrayBuffer.byteLength) {
         throw new Error(
           "Selected image contains no data."
         );
@@ -644,50 +527,34 @@ export default function TechnicianDashboard() {
       let extension = "jpeg";
 
       if (
-        selectedImage.mimeType ===
-        "image/png"
+        image.mimeType === "image/png"
       ) {
         extension = "png";
       } else if (
-        selectedImage.mimeType ===
-        "image/webp"
+        image.mimeType === "image/webp"
       ) {
         extension = "webp";
       } else if (
-        selectedImage.mimeType ===
-        "image/heic"
+        image.mimeType === "image/heic"
       ) {
         extension = "heic";
       } else if (
-        selectedImage.mimeType ===
-        "image/heif"
+        image.mimeType === "image/heif"
       ) {
         extension = "heif";
       }
 
       const contentType =
-        selectedImage.mimeType ||
+        image.mimeType ||
         (extension === "png"
           ? "image/png"
           : extension === "webp"
-            ? "image/webp"
-            : "image/jpeg");
+          ? "image/webp"
+          : "image/jpeg");
 
-      const filePath =
-        `${user.id}/${assignment.service_request_id}/${Date.now()}.${extension}`;
-
-      console.log(
-        "UPLOAD PATH:",
-        filePath
-      );
-
-      console.log(
-        "UPLOAD CONTENT TYPE:",
-        contentType
-      );
+      const filePath = `${user.id}/${assignment.service_request_id}/${Date.now()}.${extension}`;
 
       const {
-        data: uploadData,
         error: uploadError,
       } = await supabase.storage
         .from("service-evidence")
@@ -702,46 +569,24 @@ export default function TechnicianDashboard() {
         );
 
       if (uploadError) {
-        console.error(
-          "STORAGE UPLOAD ERROR:",
-          uploadError
-        );
-
         throw uploadError;
       }
 
-      console.log(
-        "STORAGE UPLOAD SUCCESS:",
-        uploadData
-      );
-
       const {
-        data: documentData,
         error: documentError,
       } = await supabase
         .from("documents")
         .insert({
           service_request_id:
             assignment.service_request_id,
-
-          uploaded_by:
-            user.id,
-
-          document_type:
-            "AFTER_PHOTO",
-
+          uploaded_by: user.id,
+          document_type: "AFTER_PHOTO",
           file_name:
-            selectedImage.fileName ||
+            image.fileName ||
             `service-evidence-${Date.now()}.${extension}`,
-
-          file_path:
-            filePath,
-
+          file_path: filePath,
           file_url: null,
-
-          mime_type:
-            contentType,
-
+          mime_type: contentType,
           file_size:
             arrayBuffer.byteLength,
         })
@@ -749,11 +594,6 @@ export default function TechnicianDashboard() {
         .single();
 
       if (documentError) {
-        console.error(
-          "DOCUMENT INSERT ERROR:",
-          documentError
-        );
-
         await supabase.storage
           .from("service-evidence")
           .remove([filePath]);
@@ -761,28 +601,17 @@ export default function TechnicianDashboard() {
         throw documentError;
       }
 
-      console.log(
-        "DOCUMENT INSERT SUCCESS:",
-        documentData
-      );
-
       await supabase
         .from("service_logs")
         .insert({
           service_request_id:
             assignment.service_request_id,
-
           technician_id:
             technician?.id,
-
-          action:
-            "AFTER_PHOTO_UPLOADED",
-
-          description:
+          log_type: "NOTE",
+          message:
             "Technician uploaded after-service photo evidence.",
-
-          created_by:
-            user?.id,
+          created_by: user?.id,
         });
 
       Alert.alert(
@@ -811,11 +640,6 @@ export default function TechnicianDashboard() {
     try {
       setWorkingId(assignment.id);
 
-      /*
-       * First make sure that the technician
-       * uploaded at least one after-service
-       * photo.
-       */
       const {
         data: evidence,
         error: evidenceError,
@@ -839,10 +663,7 @@ export default function TechnicianDashboard() {
         throw evidenceError;
       }
 
-      if (
-        !evidence ||
-        evidence.length === 0
-      ) {
+      if (!evidence?.length) {
         Alert.alert(
           "Photo Required",
           "Please upload at least one after-service photo before completing the work."
@@ -851,21 +672,6 @@ export default function TechnicianDashboard() {
         return;
       }
 
-      /*
-       * IMPORTANT:
-       *
-       * completion_records does NOT have
-       * a "status" column.
-       *
-       * The actual database schema uses:
-       * - technician_id
-       * - work_summary
-       * - submitted_at
-       * - verification_status
-       *
-       * verification_status is an enum:
-       * PENDING / APPROVED / REJECTED
-       */
       const {
         error: completionError,
       } = await supabase
@@ -873,48 +679,33 @@ export default function TechnicianDashboard() {
         .insert({
           service_request_id:
             assignment.service_request_id,
-
           technician_id:
             technician!.id,
-
           work_summary:
             "Hydraulic inspection completed. Service evidence photo submitted for manager verification.",
-
           machine_condition:
             "Inspection completed; evidence photo submitted.",
-
           additional_notes:
             "Technician completed the assigned service work and submitted it for manager verification.",
-
           submitted_at:
             new Date().toISOString(),
-
-          verification_status:
-            "PENDING",
+          verification_status: "PENDING",
         });
 
       if (completionError) {
         throw completionError;
       }
 
-      /*
-       * Mark the technician assignment
-       * as completed.
-       */
       const {
         error: assignmentError,
       } = await supabase
         .from("assignments")
         .update({
           status: "COMPLETED",
-
           completed_at:
             new Date().toISOString(),
         })
-        .eq(
-          "id",
-          assignment.id
-        )
+        .eq("id", assignment.id)
         .eq(
           "technician_id",
           technician?.id
@@ -924,10 +715,6 @@ export default function TechnicianDashboard() {
         throw assignmentError;
       }
 
-      /*
-       * Move the service request into
-       * manager verification.
-       */
       const {
         error: requestError,
       } = await supabase
@@ -944,51 +731,35 @@ export default function TechnicianDashboard() {
         throw requestError;
       }
 
-      /*
-       * Add audit/service timeline entry.
-       */
       await supabase
         .from("service_logs")
         .insert({
           service_request_id:
             assignment.service_request_id,
-
           technician_id:
             technician?.id,
-
-          action:
-            "COMPLETION_SUBMITTED",
-
-          description:
+          log_type: "NOTE",
+          message:
             "Technician completed the work and submitted it for manager verification.",
-
-          created_by:
-            user?.id,
+          created_by: user?.id,
         });
 
-      /*
-       * Notify the manager who created/
-       * assigned the request.
-       */
       if (assignment.assigned_by) {
         await supabase
           .from("notifications")
           .insert({
             user_id:
               assignment.assigned_by,
-
-            service_request_id:
+            reference_id:
               assignment.service_request_id,
-
-            type:
+            reference_type:
+              "SERVICE_REQUEST",
+            notification_type:
               "VERIFICATION_REQUIRED",
-
             title:
               "Service Verification Required",
-
             message:
               "A technician has completed the service request and submitted it for verification.",
-
             is_read: false,
           });
       }
@@ -1009,7 +780,7 @@ export default function TechnicianDashboard() {
 
       Alert.alert(
         "Error",
-        error.message ||
+        error?.message ||
           "Unable to complete the service."
       );
     } finally {
@@ -1023,32 +794,31 @@ export default function TechnicianDashboard() {
     } catch (error: any) {
       Alert.alert(
         "Logout Error",
-        error.message
+        error?.message ||
+          "Unable to logout."
       );
     }
   }
 
-  function getPriorityStyle(
+  function priorityStyle(
     priority: string
   ) {
-    switch (priority) {
-      case "CRITICAL":
-        return styles.critical;
-
-      case "HIGH":
-        return styles.high;
-
-      case "MEDIUM":
-        return styles.medium;
-
-      default:
-        return styles.low;
+    if (priority === "CRITICAL") {
+      return styles.critical;
     }
+
+    if (priority === "HIGH") {
+      return styles.high;
+    }
+
+    if (priority === "MEDIUM") {
+      return styles.medium;
+    }
+
+    return styles.low;
   }
 
-  function getStatusStyle(
-    status: string
-  ) {
+  function statusStyle(status: string) {
     switch (status) {
       case "ASSIGNED":
         return styles.assigned;
@@ -1061,6 +831,9 @@ export default function TechnicianDashboard() {
 
       case "COMPLETED":
         return styles.completed;
+
+      case "REJECTED":
+        return styles.rejected;
 
       default:
         return styles.defaultStatus;
@@ -1079,10 +852,10 @@ export default function TechnicianDashboard() {
       return null;
     }
 
-    const isBusy =
+    const busy =
       workingId === assignment.id;
 
-    const isUploading =
+    const uploading =
       uploadingId === assignment.id;
 
     return (
@@ -1090,25 +863,18 @@ export default function TechnicianDashboard() {
         key={assignment.id}
         style={styles.card}
       >
-        <View
-          style={styles.cardHeader}
-        >
+        <View style={styles.cardHeader}>
           <View
             style={{
               flex: 1,
+              paddingRight: 10,
             }}
           >
-            <Text
-              style={
-                styles.requestNumber
-              }
-            >
+            <Text style={styles.requestNumber}>
               {request.request_number}
             </Text>
 
-            <Text
-              style={styles.title}
-            >
+            <Text style={styles.title}>
               {request.title}
             </Text>
           </View>
@@ -1116,46 +882,36 @@ export default function TechnicianDashboard() {
           <View
             style={[
               styles.priorityBadge,
-              getPriorityStyle(
+              priorityStyle(
                 request.priority
               ),
             ]}
           >
-            <Text
-              style={styles.badgeText}
-            >
+            <Text style={styles.badgeText}>
               {request.priority}
             </Text>
           </View>
         </View>
 
-        <Text
-          style={styles.description}
-        >
+        <Text style={styles.description}>
           {request.description ||
             "No description provided."}
         </Text>
 
-        <View
-          style={styles.infoRow}
-        >
-          <Text
-            style={styles.infoLabel}
-          >
+        <View style={styles.infoRow}>
+          <Text style={styles.infoLabel}>
             Assignment
           </Text>
 
           <View
             style={[
               styles.statusBadge,
-              getStatusStyle(
+              statusStyle(
                 assignment.status
               ),
             ]}
           >
-            <Text
-              style={styles.statusText}
-            >
+            <Text style={styles.statusText}>
               {assignment.status}
             </Text>
           </View>
@@ -1163,18 +919,12 @@ export default function TechnicianDashboard() {
 
         {assignment.match_score !==
           null && (
-          <View
-            style={styles.infoRow}
-          >
-            <Text
-              style={styles.infoLabel}
-            >
+          <View style={styles.infoRow}>
+            <Text style={styles.infoLabel}>
               Match Score
             </Text>
 
-            <Text
-              style={styles.infoValue}
-            >
+            <Text style={styles.infoValue}>
               {Number(
                 assignment.match_score
               ).toFixed(0)}
@@ -1183,18 +933,12 @@ export default function TechnicianDashboard() {
         )}
 
         {request.sla_deadline && (
-          <View
-            style={styles.infoRow}
-          >
-            <Text
-              style={styles.infoLabel}
-            >
+          <View style={styles.infoRow}>
+            <Text style={styles.infoLabel}>
               SLA Deadline
             </Text>
 
-            <Text
-              style={styles.infoValue}
-            >
+            <Text style={styles.infoValue}>
               {new Date(
                 request.sla_deadline
               ).toLocaleString()}
@@ -1204,48 +948,44 @@ export default function TechnicianDashboard() {
 
         {assignment.status ===
           "ASSIGNED" && (
-          <View
-            style={styles.buttonRow}
-          >
+          <View style={styles.buttonRow}>
             <TouchableOpacity
               style={[
                 styles.button,
-                styles.rejectButton,
+                styles.reject,
               ]}
               onPress={() =>
                 rejectAssignment(
                   assignment
                 )
               }
-              disabled={isBusy}
+              disabled={busy}
             >
               <Text
-                style={
-                  styles.buttonText
-                }
+                style={styles.buttonText}
               >
-                Reject
+                {busy
+                  ? "Reassigning..."
+                  : "Reject"}
               </Text>
             </TouchableOpacity>
 
             <TouchableOpacity
               style={[
                 styles.button,
-                styles.acceptButton,
+                styles.accept,
               ]}
               onPress={() =>
                 acceptAssignment(
                   assignment
                 )
               }
-              disabled={isBusy}
+              disabled={busy}
             >
               <Text
-                style={
-                  styles.buttonText
-                }
+                style={styles.buttonText}
               >
-                {isBusy
+                {busy
                   ? "Please wait..."
                   : "Accept"}
               </Text>
@@ -1258,21 +998,17 @@ export default function TechnicianDashboard() {
           <TouchableOpacity
             style={[
               styles.button,
-              styles.startButton,
+              styles.start,
             ]}
             onPress={() =>
-              startWork(
-                assignment
-              )
+              startWork(assignment)
             }
-            disabled={isBusy}
+            disabled={busy}
           >
             <Text
-              style={
-                styles.buttonText
-              }
+              style={styles.buttonText}
             >
-              {isBusy
+              {busy
                 ? "Starting..."
                 : "Start Work"}
             </Text>
@@ -1285,21 +1021,19 @@ export default function TechnicianDashboard() {
             <TouchableOpacity
               style={[
                 styles.button,
-                styles.photoButton,
+                styles.photo,
               ]}
               onPress={() =>
                 uploadEvidence(
                   assignment
                 )
               }
-              disabled={isUploading}
+              disabled={uploading}
             >
               <Text
-                style={
-                  styles.buttonText
-                }
+                style={styles.buttonText}
               >
-                {isUploading
+                {uploading
                   ? "Uploading Photo..."
                   : "Add Photo Evidence"}
               </Text>
@@ -1308,21 +1042,19 @@ export default function TechnicianDashboard() {
             <TouchableOpacity
               style={[
                 styles.button,
-                styles.completeButton,
+                styles.complete,
               ]}
               onPress={() =>
                 completeWork(
                   assignment
                 )
               }
-              disabled={isBusy}
+              disabled={busy}
             >
               <Text
-                style={
-                  styles.buttonText
-                }
+                style={styles.buttonText}
               >
-                {isBusy
+                {busy
                   ? "Submitting..."
                   : "Complete Work"}
               </Text>
@@ -1336,12 +1068,23 @@ export default function TechnicianDashboard() {
             style={styles.completedBox}
           >
             <Text
-              style={
-                styles.completedText
-              }
+              style={styles.completedText}
             >
-              ✓ Work completed and
-              submitted for verification
+              ✓ Work completed and submitted
+              for verification
+            </Text>
+          </View>
+        )}
+
+        {assignment.status ===
+          "REJECTED" && (
+          <View
+            style={styles.rejectedBox}
+          >
+            <Text
+              style={styles.rejectedText}
+            >
+              Assignment rejected.
             </Text>
           </View>
         )}
@@ -1352,9 +1095,9 @@ export default function TechnicianDashboard() {
   if (loading) {
     return (
       <View style={styles.center}>
-        <Text
-          style={styles.loadingText}
-        >
+        <ActivityIndicator size="large" />
+
+        <Text style={styles.loadingText}>
           Loading technician dashboard...
         </Text>
       </View>
@@ -1364,10 +1107,8 @@ export default function TechnicianDashboard() {
   return (
     <View style={styles.container}>
       <View style={styles.header}>
-        <View>
-          <Text
-            style={styles.headerTitle}
-          >
+        <View style={styles.headerLeft}>
+          <Text style={styles.headerTitle}>
             Technician Dashboard
           </Text>
 
@@ -1379,70 +1120,45 @@ export default function TechnicianDashboard() {
           </Text>
         </View>
 
-        <TouchableOpacity
-          style={styles.logoutButton}
-          onPress={logout}
-        >
-          <Text
-            style={styles.logoutText}
+        <View style={styles.headerActions}>
+          <NotificationBell />
+
+          <TouchableOpacity
+            style={styles.logoutButton}
+            onPress={logout}
           >
-            Logout
-          </Text>
-        </TouchableOpacity>
+            <Text style={styles.logoutText}>
+              Logout
+            </Text>
+          </TouchableOpacity>
+        </View>
       </View>
 
-      <View
-        style={styles.profileCard}
-      >
-        <View>
-          <Text
-            style={styles.profileLabel}
-          >
-            Availability
-          </Text>
+      <View style={styles.profileCard}>
+        <Stat
+          label="Availability"
+          value={
+            technician?.availability ||
+            "UNKNOWN"
+          }
+        />
 
-          <Text
-            style={styles.profileValue}
-          >
-            {technician?.availability ||
-              "UNKNOWN"}
-          </Text>
-        </View>
+        <Stat
+          label="Workload"
+          value={
+            technician?.current_workload ??
+            0
+          }
+        />
 
-        <View>
-          <Text
-            style={styles.profileLabel}
-          >
-            Workload
-          </Text>
-
-          <Text
-            style={styles.profileValue}
-          >
-            {technician?.current_workload ??
-              0}
-          </Text>
-        </View>
-
-        <View>
-          <Text
-            style={styles.profileLabel}
-          >
-            Assignments
-          </Text>
-
-          <Text
-            style={styles.profileValue}
-          >
-            {assignments.length}
-          </Text>
-        </View>
+        <Stat
+          label="Assignments"
+          value={assignments.length}
+        />
       </View>
 
       <ScrollView
-        contentContainerStyle={
-          styles.scrollContent
-        }
+        contentContainerStyle={styles.scroll}
         refreshControl={
           <RefreshControl
             refreshing={refreshing}
@@ -1450,27 +1166,19 @@ export default function TechnicianDashboard() {
           />
         }
       >
-        <Text
-          style={styles.sectionTitle}
-        >
+        <Text style={styles.sectionTitle}>
           My Assignments
         </Text>
 
         {assignments.length === 0 ? (
-          <View
-            style={styles.emptyCard}
-          >
-            <Text
-              style={styles.emptyTitle}
-            >
+          <View style={styles.empty}>
+            <Text style={styles.emptyTitle}>
               No Assignments
             </Text>
 
-            <Text
-              style={styles.emptyText}
-            >
-              You currently have no
-              service assignments.
+            <Text style={styles.muted}>
+              You currently have no service
+              assignments.
             </Text>
           </View>
         ) : (
@@ -1479,6 +1187,26 @@ export default function TechnicianDashboard() {
           )
         )}
       </ScrollView>
+    </View>
+  );
+}
+
+function Stat({
+  label,
+  value,
+}: {
+  label: string;
+  value: string | number;
+}) {
+  return (
+    <View>
+      <Text style={styles.profileLabel}>
+        {label}
+      </Text>
+
+      <Text style={styles.profileValue}>
+        {value}
+      </Text>
     </View>
   );
 }
@@ -1497,6 +1225,17 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
+  },
+
+  headerLeft: {
+    flex: 1,
+    paddingRight: 10,
+  },
+
+  headerActions: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
   },
 
   headerTitle: {
@@ -1545,7 +1284,7 @@ const styles = StyleSheet.create({
     color: "#172033",
   },
 
-  scrollContent: {
+  scroll: {
     paddingHorizontal: 16,
     paddingBottom: 30,
   },
@@ -1670,6 +1409,10 @@ const styles = StyleSheet.create({
     backgroundColor: "#16a34a",
   },
 
+  rejected: {
+    backgroundColor: "#dc2626",
+  },
+
   defaultStatus: {
     backgroundColor: "#64748b",
   },
@@ -1690,23 +1433,23 @@ const styles = StyleSheet.create({
     marginTop: 12,
   },
 
-  acceptButton: {
+  accept: {
     backgroundColor: "#16a34a",
   },
 
-  rejectButton: {
+  reject: {
     backgroundColor: "#dc2626",
   },
 
-  startButton: {
+  start: {
     backgroundColor: "#2563eb",
   },
 
-  photoButton: {
+  photo: {
     backgroundColor: "#7c3aed",
   },
 
-  completeButton: {
+  complete: {
     backgroundColor: "#16a34a",
   },
 
@@ -1729,7 +1472,20 @@ const styles = StyleSheet.create({
     fontWeight: "600",
   },
 
-  emptyCard: {
+  rejectedBox: {
+    marginTop: 14,
+    padding: 12,
+    borderRadius: 10,
+    backgroundColor: "#fee2e2",
+  },
+
+  rejectedText: {
+    color: "#991b1b",
+    fontSize: 13,
+    fontWeight: "600",
+  },
+
+  empty: {
     backgroundColor: "#ffffff",
     borderRadius: 16,
     padding: 30,
@@ -1743,7 +1499,7 @@ const styles = StyleSheet.create({
     marginBottom: 6,
   },
 
-  emptyText: {
+  muted: {
     color: "#6c7482",
     textAlign: "center",
     lineHeight: 20,
@@ -1759,5 +1515,6 @@ const styles = StyleSheet.create({
   loadingText: {
     color: "#172033",
     fontSize: 15,
+    marginTop: 10,
   },
 });

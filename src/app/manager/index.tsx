@@ -1,56 +1,56 @@
-import { useEffect, useState } from "react";
-
+import React, { useEffect, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
-  FlatList,
   Image,
   RefreshControl,
+  SafeAreaView,
+  ScrollView,
   StyleSheet,
   Text,
   TouchableOpacity,
   View,
 } from "react-native";
-
 import { router } from "expo-router";
-
+import NotificationBell from "../../components/NotificationBell";
 import { supabase } from "../../lib/supabase";
 import { signOut } from "../../services/auth";
 
-type ServiceRequest = {
+type Request = {
   id: string;
   request_number: string;
   title: string;
   priority: string;
   status: string;
   machine_id: string;
+
+  machines?: {
+    name: string;
+    machine_code: string;
+  } | null;
 };
 
 type Evidence = {
   id: string;
-  file_name: string;
+  file_name: string | null;
   file_path: string;
   file_url: string | null;
 };
 
-type RequestWithEvidence = ServiceRequest & {
+type RequestWithEvidence = Request & {
   evidence: Evidence[];
 };
 
 export default function ManagerDashboard() {
-  const [requests, setRequests] = useState<
-    RequestWithEvidence[]
-  >([]);
-
+  const [requests, setRequests] = useState<RequestWithEvidence[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  const [actionLoading, setActionLoading] =
-    useState(false);
+  const [actionLoading, setActionLoading] = useState(false);
 
   useEffect(() => {
     loadRequests();
 
-    const requestChannel = supabase
+    const requestsChannel = supabase
       .channel("manager-service-requests")
       .on(
         "postgres_changes",
@@ -59,22 +59,11 @@ export default function ManagerDashboard() {
           schema: "public",
           table: "service_requests",
         },
-        () => {
-          console.log(
-            "MANAGER REQUEST REALTIME UPDATE"
-          );
-
-          loadRequests();
-        }
+        loadRequests
       )
-      .subscribe((status) => {
-        console.log(
-          "Manager request realtime:",
-          status
-        );
-      });
+      .subscribe();
 
-    const documentChannel = supabase
+    const documentsChannel = supabase
       .channel("manager-service-documents")
       .on(
         "postgres_changes",
@@ -83,24 +72,13 @@ export default function ManagerDashboard() {
           schema: "public",
           table: "documents",
         },
-        () => {
-          console.log(
-            "MANAGER DOCUMENT REALTIME UPDATE"
-          );
-
-          loadRequests();
-        }
+        loadRequests
       )
-      .subscribe((status) => {
-        console.log(
-          "Manager document realtime:",
-          status
-        );
-      });
+      .subscribe();
 
     return () => {
-      supabase.removeChannel(requestChannel);
-      supabase.removeChannel(documentChannel);
+      supabase.removeChannel(requestsChannel);
+      supabase.removeChannel(documentsChannel);
     };
   }, []);
 
@@ -108,62 +86,54 @@ export default function ManagerDashboard() {
     try {
       const { data, error } = await supabase
         .from("service_requests")
-        .select(
-          `
-          id,
-          request_number,
-          title,
-          priority,
-          status,
-          machine_id
-          `
-        )
+        .select(`
+  id,
+  request_number,
+  title,
+  priority,
+  status,
+  machine_id,
+  machines (
+    name,
+    machine_code
+  )
+`)
         .order("created_at", {
           ascending: false,
         });
 
       if (error) {
-        console.log(
-          "REQUEST ERROR:",
-          error
-        );
-
-        return;
+        throw error;
       }
 
-      const requestList = data ?? [];
+      const rows: Request[] = (data || []).map((row: any) => ({
+  ...row,
+  machines: row.machines ?? null,
+}));
 
-      if (requestList.length === 0) {
+      if (!rows.length) {
         setRequests([]);
         return;
       }
 
-      const requestIds = requestList.map(
-        (request) => request.id
-      );
+      const ids = rows.map((request) => request.id);
 
       const {
-        data: documentData,
+        data: documents,
         error: documentError,
       } = await supabase
         .from("documents")
         .select(
-          "id, service_request_id, file_name, file_path, file_url"
+          "id,service_request_id,file_name,file_path,file_url,document_type,created_at"
         )
-        .in(
-          "service_request_id",
-          requestIds
-        )
-        .eq(
-          "document_type",
-          "AFTER_PHOTO"
-        )
+        .in("service_request_id", ids)
+        .eq("document_type", "AFTER_PHOTO")
         .order("created_at", {
           ascending: false,
         });
 
       if (documentError) {
-        console.log(
+        console.error(
           "DOCUMENT ERROR:",
           documentError
         );
@@ -174,22 +144,10 @@ export default function ManagerDashboard() {
         Evidence[]
       > = {};
 
-      for (
-        const document of documentData ?? []
-      ) {
-        console.log(
-          "DOCUMENT FOUND:",
-          document.file_name
-        );
-
-        console.log(
-          "STORAGE PATH:",
-          document.file_path
-        );
-
+      for (const document of documents || []) {
         const {
-          data: signedUrlData,
-          error: signedUrlError,
+          data: signed,
+          error: signedError,
         } = await supabase.storage
           .from("service-evidence")
           .createSignedUrl(
@@ -197,25 +155,15 @@ export default function ManagerDashboard() {
             60 * 60
           );
 
-        if (signedUrlError) {
-          console.log(
+        if (signedError) {
+          console.error(
             "SIGNED URL ERROR:",
-            signedUrlError
+            signedError
           );
-
           continue;
         }
 
-        console.log(
-          "SIGNED URL CREATED:",
-          signedUrlData?.signedUrl
-        );
-
-        if (
-          !evidenceByRequest[
-            document.service_request_id
-          ]
-        ) {
+        if (!evidenceByRequest[document.service_request_id]) {
           evidenceByRequest[
             document.service_request_id
           ] = [];
@@ -227,46 +175,40 @@ export default function ManagerDashboard() {
           id: document.id,
           file_name: document.file_name,
           file_path: document.file_path,
-          file_url:
-            signedUrlData?.signedUrl ??
-            null,
+          file_url: signed?.signedUrl || null,
         });
       }
 
-      const combinedData: RequestWithEvidence[] =
-        requestList.map((request) => ({
+      setRequests(
+        rows.map((request) => ({
           ...request,
           evidence:
-            evidenceByRequest[
-              request.id
-            ] ?? [],
-        }));
-
-      setRequests(combinedData);
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  async function refresh() {
-    try {
-      setRefreshing(true);
-
-      await loadRequests();
+            evidenceByRequest[request.id] || [],
+        }))
+      );
     } catch (error: any) {
+      console.error(
+        "LOAD MANAGER REQUESTS ERROR:",
+        error
+      );
+
       Alert.alert(
         "Error",
-        error.message ||
-          "Unable to refresh requests."
+        error?.message ||
+          "Unable to load service requests."
       );
     } finally {
+      setLoading(false);
       setRefreshing(false);
     }
   }
 
-  async function verifyAndClose(
-    request: ServiceRequest
-  ) {
+  async function refreshDashboard() {
+    setRefreshing(true);
+    await loadRequests();
+  }
+
+  async function verifyAndClose(request: Request) {
     Alert.alert(
       "Verify Service",
       `Are you sure you want to verify and close ${request.request_number}?`,
@@ -283,32 +225,28 @@ export default function ManagerDashboard() {
 
               const {
                 data: { user },
-              } =
-                await supabase.auth.getUser();
+                error: userError,
+              } = await supabase.auth.getUser();
 
-              if (!user) {
-                Alert.alert(
-                  "Error",
-                  "Manager session not found."
-                );
-
-                return;
+              if (userError) {
+                throw userError;
               }
 
-              const now =
-                new Date().toISOString();
+              if (!user) {
+                throw new Error(
+                  "Manager session not found."
+                );
+              }
 
-              /*
-               * Find latest assignment.
-               */
+              const now = new Date().toISOString();
+
               const {
                 data: assignment,
-                error:
-                  assignmentFetchError,
+                error: assignmentError,
               } = await supabase
                 .from("assignments")
                 .select(
-                  "id, technician_id, status"
+                  "id,technician_id,status"
                 )
                 .eq(
                   "service_request_id",
@@ -320,20 +258,16 @@ export default function ManagerDashboard() {
                 .limit(1)
                 .maybeSingle();
 
-              if (assignmentFetchError) {
-                throw assignmentFetchError;
+              if (assignmentError) {
+                throw assignmentError;
               }
 
-              /*
-               * Approve completion record.
-               */
               const {
                 error: completionError,
               } = await supabase
                 .from("completion_records")
                 .update({
-                  verification_status:
-                    "APPROVED",
+                  verification_status: "APPROVED",
                   verified_by: user.id,
                   verified_at: now,
                 })
@@ -350,9 +284,6 @@ export default function ManagerDashboard() {
                 throw completionError;
               }
 
-              /*
-               * Close request.
-               */
               const {
                 error: requestError,
               } = await supabase
@@ -362,18 +293,12 @@ export default function ManagerDashboard() {
                   approved_by: user.id,
                   approved_at: now,
                 })
-                .eq(
-                  "id",
-                  request.id
-                );
+                .eq("id", request.id);
 
               if (requestError) {
                 throw requestError;
               }
 
-              /*
-               * Return machine to operational.
-               */
               const {
                 error: machineError,
               } = await supabase
@@ -382,57 +307,42 @@ export default function ManagerDashboard() {
                   status: "OPERATIONAL",
                   last_service_date: now,
                 })
-                .eq(
-                  "id",
-                  request.machine_id
-                );
+                .eq("id", request.machine_id);
 
               if (machineError) {
-                console.log(
+                console.error(
                   "MACHINE UPDATE ERROR:",
                   machineError
                 );
               }
 
-              /*
-               * Ensure assignment is completed.
-               */
               if (assignment?.id) {
                 const {
-                  error: assignmentError,
+                  error: assignmentUpdateError,
                 } = await supabase
                   .from("assignments")
                   .update({
                     status: "COMPLETED",
                     completed_at: now,
                   })
-                  .eq(
-                    "id",
-                    assignment.id
-                  );
+                  .eq("id", assignment.id);
 
-                if (assignmentError) {
-                  console.log(
+                if (assignmentUpdateError) {
+                  console.error(
                     "ASSIGNMENT UPDATE ERROR:",
-                    assignmentError
+                    assignmentUpdateError
                   );
                 }
               }
 
-              /*
-               * Release technician.
-               */
-              if (
-                assignment?.technician_id
-              ) {
+              if (assignment?.technician_id) {
                 const {
                   data: technician,
-                  error:
-                    technicianFetchError,
+                  error: technicianError,
                 } = await supabase
                   .from("technicians")
                   .select(
-                    "id, profile_id, current_workload"
+                    "id,profile_id,current_workload"
                   )
                   .eq(
                     "id",
@@ -440,67 +350,49 @@ export default function ManagerDashboard() {
                   )
                   .single();
 
-                if (technicianFetchError) {
-                  console.log(
+                if (technicianError) {
+                  console.error(
                     "TECHNICIAN FETCH ERROR:",
-                    technicianFetchError
+                    technicianError
                   );
-                } else if (technician) {
-                  const newWorkload =
-                    Math.max(
-                      0,
-                      (technician.current_workload ??
-                        0) - 1
-                    );
+                }
 
-                  const {
-                    error:
-                      technicianUpdateError,
-                  } = await supabase
+                if (technician) {
+                  const newWorkload = Math.max(
+                    0,
+                    (technician.current_workload ||
+                      0) - 1
+                  );
+
+                  await supabase
                     .from("technicians")
                     .update({
-                      availability:
-                        "AVAILABLE",
-                      current_workload:
-                        newWorkload,
+                      availability: "AVAILABLE",
+                      current_workload: newWorkload,
                     })
-                    .eq(
-                      "id",
-                      technician.id
-                    );
+                    .eq("id", technician.id);
 
-                  if (
-                    technicianUpdateError
-                  ) {
-                    console.log(
-                      "TECHNICIAN UPDATE ERROR:",
-                      technicianUpdateError
-                    );
-                  }
-
-                  /*
-                   * Notify technician.
-                   */
                   const {
-                    error:
-                      notificationError,
+                    error: notificationError,
                   } = await supabase
                     .from("notifications")
                     .insert({
                       user_id:
                         technician.profile_id,
-                      type:
+                      notification_type:
                         "REQUEST_VERIFIED",
                       title:
                         "Service Request Verified",
                       message:
                         `${request.request_number} has been verified and closed by the operations manager.`,
-                      service_request_id:
-                        request.id,
+                      reference_id: request.id,
+                      reference_type:
+                        "service_request",
+                      is_read: false,
                     });
 
                   if (notificationError) {
-                    console.log(
+                    console.error(
                       "NOTIFICATION ERROR:",
                       notificationError
                     );
@@ -508,26 +400,24 @@ export default function ManagerDashboard() {
                 }
               }
 
-              /*
-               * Final service log.
-               */
               const {
                 error: logError,
               } = await supabase
                 .from("service_logs")
                 .insert({
-                  service_request_id:
-                    request.id,
-                  action:
-                    "MANAGER_VERIFIED",
-                  description:
+                  service_request_id: request.id,
+                  log_type: "NOTE",
+                  message:
                     "Operations manager verified the service evidence, approved the completion record, and closed the request.",
-                  created_by:
-                    user.id,
+                  created_by: user.id,
+                  metadata: {
+                    request_number:
+                      request.request_number,
+                  },
                 });
 
               if (logError) {
-                console.log(
+                console.error(
                   "VERIFICATION LOG ERROR:",
                   logError
                 );
@@ -547,7 +437,7 @@ export default function ManagerDashboard() {
 
               Alert.alert(
                 "Verification Failed",
-                error.message ||
+                error?.message ||
                   "Unable to verify the service request."
               );
             } finally {
@@ -562,40 +452,46 @@ export default function ManagerDashboard() {
   async function handleLogout() {
     try {
       await signOut();
-
       router.replace("/");
-    } catch (error) {
+    } catch (error: any) {
       Alert.alert(
-        "Logout failed",
-        error instanceof Error
-          ? error.message
-          : "Something went wrong."
+        "Logout Failed",
+        error?.message ||
+          "Unable to logout."
       );
     }
   }
 
-  function getPriorityStyle(
-    priority: string
-  ) {
-    switch (priority) {
-      case "CRITICAL":
-        return styles.critical;
-
-      case "HIGH":
-        return styles.high;
-
-      case "MEDIUM":
-        return styles.medium;
-
-      default:
-        return styles.low;
+  function priorityStyle(priority: string) {
+    if (priority === "CRITICAL") {
+      return styles.critical;
     }
+
+    if (priority === "HIGH") {
+      return styles.high;
+    }
+
+    if (priority === "MEDIUM") {
+      return styles.medium;
+    }
+
+    return styles.low;
   }
 
-  function getStatusStyle(
-    status: string
-  ) {
+  function statusStyle(status: string) {
     switch (status) {
+      case "PENDING":
+        return styles.pending;
+
+      case "VALIDATING":
+        return styles.validating;
+
+      case "AWAITING_APPROVAL":
+        return styles.awaiting;
+
+      case "APPROVED":
+        return styles.approved;
+
       case "ASSIGNED":
         return styles.assigned;
 
@@ -605,424 +501,370 @@ export default function ManagerDashboard() {
       case "IN_PROGRESS":
         return styles.inProgress;
 
+      case "ON_HOLD":
+        return styles.onHold;
+
       case "VERIFICATION":
         return styles.verification;
 
       case "CLOSED":
-        return styles.completed;
+        return styles.closed;
 
       case "CANCELLED":
         return styles.cancelled;
 
       default:
-        return styles.defaultStatus;
+        return styles.pending;
     }
   }
 
-  function renderRequest({
-    item,
-  }: {
-    item: RequestWithEvidence;
-  }) {
-    const isVerification =
-      item.status === "VERIFICATION";
-
+  function renderCard(
+    request: RequestWithEvidence
+  ) {
     return (
-      <View style={styles.card}>
-        <View style={styles.cardHeader}>
+      <View
+        key={request.id}
+        style={
+          request.status === "VERIFICATION"
+            ? styles.verificationCard
+            : styles.card
+        }
+      >
+        <View style={styles.top}>
           <View
             style={{
               flex: 1,
+              paddingRight: 10,
             }}
           >
-            <Text
-              style={
-                styles.requestNumber
-              }
-            >
-              {item.request_number}
+            <Text style={styles.number}>
+              {request.request_number}
             </Text>
 
-            <Text
-              style={styles.requestTitle}
-            >
-              {item.title}
+            <Text style={styles.cardTitle}>
+              {request.title}
             </Text>
           </View>
 
           <View
             style={[
-              styles.priorityBadge,
-              getPriorityStyle(
-                item.priority
-              ),
+              styles.badge,
+              priorityStyle(request.priority),
             ]}
           >
-            <Text
-              style={styles.badgeText}
-            >
-              {item.priority}
+            <Text style={styles.badgeText}>
+              {request.priority}
             </Text>
           </View>
         </View>
 
-        <View style={styles.infoRow}>
-          <Text
-            style={styles.infoLabel}
-          >
-            Status
-          </Text>
-
+        <View style={styles.row}>
           <View
             style={[
-              styles.statusBadge,
-              getStatusStyle(
-                item.status
-              ),
+              styles.badge,
+              statusStyle(request.status),
             ]}
           >
-            <Text
-              style={styles.statusText}
-            >
-              {item.status}
+            <Text style={styles.badgeText}>
+              {request.status.replace(
+                /_/g,
+                " "
+              )}
             </Text>
           </View>
-        </View>
-
-        <View style={styles.infoRow}>
-          <Text
-            style={styles.infoLabel}
-          >
-            Machine
-          </Text>
 
           <Text
-            style={styles.infoValue}
-          >
-            {item.machine_id}
-          </Text>
+  style={styles.machineText}
+  numberOfLines={1}
+>
+  Machine:{" "}
+  {request.machines?.machine_code ||
+    request.machine_id}
+
+  {request.machines?.name
+    ? ` — ${request.machines.name}`
+    : ""}
+</Text>
         </View>
 
-        {item.evidence.length > 0 && (
-          <View
-            style={
-              styles.evidenceSection
-            }
-          >
-            <Text
-              style={
-                styles.sectionTitle
-              }
+        {request.evidence.length > 0 && (
+          <View style={styles.evidence}>
+            <View
+              style={styles.evidenceHeader}
             >
-              Service Evidence
-            </Text>
+              <Text
+                style={styles.evidenceTitle}
+              >
+                Service Evidence
+              </Text>
 
-            <FlatList
-              data={item.evidence}
+              <Text style={styles.muted}>
+                {request.evidence.length} photo
+                {request.evidence.length !== 1
+                  ? "s"
+                  : ""}
+              </Text>
+            </View>
+
+            <ScrollView
               horizontal
-              keyExtractor={(
-                evidence
-              ) => evidence.id}
               showsHorizontalScrollIndicator={
                 false
               }
-              renderItem={({
-                item: evidence,
-              }) => (
-                <View
-                  style={
-                    styles.evidenceContainer
-                  }
-                >
-                  {evidence.file_url ? (
-                    <Image
-                      source={{
-                        uri: evidence.file_url,
-                      }}
-                      style={
-                        styles.evidenceImage
-                      }
-                      onLoad={() => {
-                        console.log(
-                          "EVIDENCE IMAGE LOADED:",
-                          evidence.file_name
-                        );
-                      }}
-                      onError={(event) => {
-                        console.log(
-                          "EVIDENCE IMAGE ERROR:",
-                          evidence.file_name,
-                          event.nativeEvent
-                            .error
-                        );
-                      }}
-                    />
-                  ) : (
-                    <View
-                      style={
-                        styles.imagePlaceholder
-                      }
-                    >
-                      <Text
-                        style={
-                          styles.placeholderText
-                        }
-                      >
-                        Image unavailable
-                      </Text>
-                    </View>
-                  )}
-
-                  <Text
+            >
+              {request.evidence.map(
+                (evidence) => (
+                  <View
+                    key={evidence.id}
                     style={
-                      styles.evidenceFileName
+                      styles.evidenceItem
                     }
-                    numberOfLines={1}
                   >
-                    {evidence.file_name}
-                  </Text>
-                </View>
+                    {evidence.file_url ? (
+                      <Image
+                        source={{
+                          uri: evidence.file_url,
+                        }}
+                        style={styles.image}
+                        resizeMode="cover"
+                      />
+                    ) : (
+                      <View
+                        style={[
+                          styles.image,
+                          styles.placeholder,
+                        ]}
+                      >
+                        <Text
+                          style={styles.muted}
+                        >
+                          Image unavailable
+                        </Text>
+                      </View>
+                    )}
+
+                    <Text
+                      style={styles.fileName}
+                      numberOfLines={1}
+                    >
+                      {evidence.file_name ||
+                        "Service photo"}
+                    </Text>
+                  </View>
+                )
               )}
-            />
+            </ScrollView>
           </View>
         )}
 
-        {isVerification && (
-          <View
-            style={
-              styles.verificationBox
-            }
-          >
-            <Text
-              style={
-                styles.verificationTitle
-              }
-            >
-              Verification Required
-            </Text>
-
-            <Text
-              style={
-                styles.verificationText
-              }
-            >
-              Review the service evidence
-              above before closing this
-              request.
-            </Text>
-
-            <TouchableOpacity
-              style={
-                styles.verifyButton
-              }
-              disabled={
-                actionLoading
-              }
-              onPress={() =>
-                verifyAndClose(item)
-              }
-            >
-              <Text
-                style={
-                  styles.buttonText
-                }
-              >
-                {actionLoading
-                  ? "Verifying..."
-                  : "Verify & Close"}
+        {request.evidence.length === 0 &&
+          [
+            "VERIFICATION",
+            "IN_PROGRESS",
+            "COMPLETED",
+          ].includes(request.status) && (
+            <View style={styles.noEvidence}>
+              <Text style={styles.muted}>
+                No service evidence uploaded yet.
               </Text>
-            </TouchableOpacity>
-          </View>
-        )}
+            </View>
+          )}
 
-        {item.status === "CLOSED" && (
-          <View
-            style={
-              styles.completedBox
+        {request.status === "VERIFICATION" && (
+          <TouchableOpacity
+            style={styles.verifyButton}
+            disabled={actionLoading}
+            onPress={() =>
+              verifyAndClose(request)
             }
           >
-            <Text
-              style={
-                styles.completedText
-              }
-            >
-              ✓ Service verified and
-              closed
+            <Text style={styles.buttonText}>
+              {actionLoading
+                ? "Verifying..."
+                : "Verify & Close"}
             </Text>
-          </View>
+          </TouchableOpacity>
         )}
       </View>
     );
   }
 
-  if (loading) {
-    return (
-      <View style={styles.center}>
-        <ActivityIndicator
-          size="large"
-        />
+  const total = requests.length;
 
-        <Text
-          style={styles.loadingText}
-        >
-          Loading manager dashboard...
-        </Text>
-      </View>
-    );
-  }
+  const verification = requests.filter(
+    (request) =>
+      request.status === "VERIFICATION"
+  ).length;
+
+  const closed = requests.filter(
+    (request) => request.status === "CLOSED"
+  ).length;
 
   return (
-    <View style={styles.container}>
-      <View style={styles.header}>
-        <View>
-          <Text
-            style={styles.headerTitle}
-          >
-            Manager Dashboard
-          </Text>
-
-          <Text
-            style={styles.headerSubtitle}
-          >
-            Operations Manager
-          </Text>
-        </View>
-
-        <View
-          style={styles.headerActions}
-        >
-          <TouchableOpacity
-            style={styles.createHeaderButton}
-            onPress={() =>
-              router.push(
-                "/manager/create-request"
-              )
-            }
-          >
-            <Text
-              style={
-                styles.createHeaderText
-              }
-            >
-              + Create Request
-            </Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={styles.logoutButton}
-            onPress={handleLogout}
-          >
-            <Text
-              style={styles.logoutText}
-            >
-              Logout
-            </Text>
-          </TouchableOpacity>
-        </View>
-      </View>
-
-      <View
-        style={styles.summaryCard}
-      >
-        <View>
-          <Text
-            style={styles.summaryLabel}
-          >
-            Total Requests
-          </Text>
-
-          <Text
-            style={styles.summaryValue}
-          >
-            {requests.length}
-          </Text>
-        </View>
-
-        <View>
-          <Text
-            style={styles.summaryLabel}
-          >
-            Verification
-          </Text>
-
-          <Text
-            style={styles.summaryValue}
-          >
-            {
-              requests.filter(
-                (request) =>
-                  request.status ===
-                  "VERIFICATION"
-              ).length
-            }
-          </Text>
-        </View>
-
-        <View>
-          <Text
-            style={styles.summaryLabel}
-          >
-            Closed
-          </Text>
-
-          <Text
-            style={styles.summaryValue}
-          >
-            {
-              requests.filter(
-                (request) =>
-                  request.status ===
-                  "CLOSED"
-              ).length
-            }
-          </Text>
-        </View>
-      </View>
-
-      <View
-        style={styles.sectionHeader}
-      >
-        <Text
-          style={styles.listTitle}
-        >
-          Service Requests
-        </Text>
-      </View>
-
-      <FlatList
-        data={requests}
-        keyExtractor={(item) =>
-          item.id
-        }
-        renderItem={renderRequest}
-        contentContainerStyle={
-          styles.listContent
-        }
+    <SafeAreaView style={styles.container}>
+      <ScrollView
         refreshControl={
           <RefreshControl
             refreshing={refreshing}
-            onRefresh={refresh}
+            onRefresh={refreshDashboard}
           />
         }
-        ListEmptyComponent={
-          <View
-            style={styles.emptyCard}
-          >
-            <Text
-              style={styles.emptyTitle}
+        showsVerticalScrollIndicator={false}
+      >
+        <View style={styles.header}>
+          <View style={styles.headerTop}>
+            <View
+              style={{
+                flex: 1,
+                paddingRight: 10,
+              }}
             >
-              No Service Requests
+              <Text style={styles.title}>
+                Manager Dashboard
+              </Text>
+
+              <Text style={styles.subtitle}>
+                Equipment service operations
+              </Text>
+            </View>
+
+            <View style={styles.headerActions}>
+              <NotificationBell />
+
+              <TouchableOpacity
+                style={styles.logout}
+                onPress={handleLogout}
+              >
+                <Text
+                  style={styles.logoutText}
+                >
+                  Logout
+                </Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+
+          <View style={styles.actionRow}>
+            <TouchableOpacity
+              style={styles.primary}
+              onPress={() =>
+                router.push(
+                  "/manager/create-request"
+                )
+              }
+            >
+              <Text style={styles.buttonText}>
+                + Create Request
+              </Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={styles.secondary}
+              onPress={() =>
+                router.push(
+                  "/manager/spare-parts"
+                )
+              }
+            >
+              <Text style={styles.buttonText}>
+                Spare Parts
+              </Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+
+        <View style={styles.summary}>
+          <Stat
+            number={total}
+            label="Total Requests"
+          />
+
+          <Stat
+            number={verification}
+            label="Pending Verification"
+          />
+
+          <Stat
+            number={closed}
+            label="Closed"
+          />
+        </View>
+
+        {verification > 0 && (
+          <View style={styles.section}>
+            <Text style={styles.sectionTitle}>
+              Verification Required
             </Text>
 
-            <Text
-              style={styles.emptyText}
-            >
-              There are currently no
-              service requests to display.
+            <Text style={styles.sectionSubtitle}>
+              Review completed service requests
             </Text>
+
+            {requests
+              .filter(
+                (request) =>
+                  request.status ===
+                  "Pending Verification"
+              )
+              .map(renderCard)}
           </View>
-        }
-      />
+        )}
+
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>
+            Service Requests
+          </Text>
+
+          <Text style={styles.sectionSubtitle}>
+            Latest equipment service activity
+          </Text>
+
+          {loading ? (
+            <View style={styles.empty}>
+              <ActivityIndicator size="large" />
+
+              <Text style={styles.muted}>
+                Loading service requests...
+              </Text>
+            </View>
+          ) : requests.length === 0 ? (
+            <View style={styles.empty}>
+              <Text style={styles.emptyTitle}>
+                No service requests
+              </Text>
+
+              <Text style={styles.muted}>
+                Create a service request to
+                start the workflow.
+              </Text>
+            </View>
+          ) : (
+            requests.map(renderCard)
+          )}
+        </View>
+
+        <View style={{ height: 30 }} />
+      </ScrollView>
+    </SafeAreaView>
+  );
+}
+
+function Stat({
+  number,
+  label,
+}: {
+  number: number;
+  label: string;
+}) {
+  return (
+    <View style={styles.stat}>
+      <Text style={styles.statNumber}>
+        {number}
+      </Text>
+
+      <Text style={styles.muted}>
+        {label}
+      </Text>
     </View>
   );
 }
@@ -1030,29 +872,20 @@ export default function ManagerDashboard() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: "#f5f7fa",
+    backgroundColor: "#f5f7fb",
   },
 
   header: {
-    paddingTop: 55,
-    paddingHorizontal: 16,
-    paddingBottom: 18,
-    backgroundColor: "#172033",
+    backgroundColor: "#ffffff",
+    padding: 18,
+    borderBottomWidth: 1,
+    borderBottomColor: "#e5e7eb",
+  },
+
+  headerTop: {
     flexDirection: "row",
-    justifyContent: "space-between",
     alignItems: "center",
-  },
-
-  headerTitle: {
-    color: "#ffffff",
-    fontSize: 22,
-    fontWeight: "700",
-  },
-
-  headerSubtitle: {
-    color: "#c7d0df",
-    fontSize: 14,
-    marginTop: 4,
+    justifyContent: "space-between",
   },
 
   headerActions: {
@@ -1061,158 +894,197 @@ const styles = StyleSheet.create({
     gap: 8,
   },
 
-  createHeaderButton: {
-    paddingHorizontal: 11,
-    paddingVertical: 8,
-    borderRadius: 8,
-    backgroundColor: "#16a34a",
+  title: {
+    fontSize: 25,
+    fontWeight: "800",
+    color: "#111827",
   },
 
-  createHeaderText: {
-    color: "#ffffff",
-    fontSize: 12,
-    fontWeight: "700",
+  subtitle: {
+    marginTop: 4,
+    fontSize: 13,
+    color: "#6b7280",
   },
 
-  logoutButton: {
-    paddingHorizontal: 10,
-    paddingVertical: 8,
-    borderRadius: 8,
-    backgroundColor: "#ffffff22",
+  logout: {
+    height: 38,
+    paddingHorizontal: 14,
+    borderRadius: 9,
+    backgroundColor: "#fee2e2",
+    alignItems: "center",
+    justifyContent: "center",
   },
 
   logoutText: {
-    color: "#ffffff",
-    fontSize: 12,
-    fontWeight: "600",
+    color: "#b91c1c",
+    fontWeight: "700",
   },
 
-  summaryCard: {
-    margin: 16,
-    padding: 16,
-    backgroundColor: "#ffffff",
-    borderRadius: 14,
+  actionRow: {
     flexDirection: "row",
-    justifyContent: "space-between",
-    elevation: 2,
+    gap: 10,
+    marginTop: 16,
   },
 
-  summaryLabel: {
-    fontSize: 12,
-    color: "#7b8494",
-    marginBottom: 4,
+  primary: {
+    flex: 1,
+    height: 44,
+    borderRadius: 10,
+    backgroundColor: "#111827",
+    alignItems: "center",
+    justifyContent: "center",
   },
 
-  summaryValue: {
+  secondary: {
+    flex: 1,
+    height: 44,
+    borderRadius: 10,
+    backgroundColor: "#2563eb",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+
+  buttonText: {
+    color: "#ffffff",
+    fontSize: 13,
+    fontWeight: "700",
+  },
+
+  summary: {
+    flexDirection: "row",
+    gap: 10,
+    padding: 16,
+    paddingBottom: 0,
+  },
+
+  stat: {
+    flex: 1,
+    minHeight: 88,
+    backgroundColor: "#ffffff",
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "#e5e7eb",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+
+  statNumber: {
+    fontSize: 24,
+    fontWeight: "800",
+    color: "#111827",
+  },
+
+  section: {
+    padding: 16,
+    paddingBottom: 0,
+  },
+
+  sectionTitle: {
     fontSize: 18,
-    fontWeight: "700",
-    color: "#172033",
+    fontWeight: "800",
+    color: "#111827",
   },
 
-  sectionHeader: {
-    paddingHorizontal: 16,
+  sectionSubtitle: {
+    fontSize: 12,
+    color: "#6b7280",
+    marginTop: 3,
     marginBottom: 10,
-  },
-
-  listTitle: {
-    fontSize: 20,
-    fontWeight: "700",
-    color: "#172033",
-  },
-
-  listContent: {
-    paddingHorizontal: 16,
-    paddingBottom: 30,
   },
 
   card: {
     backgroundColor: "#ffffff",
-    borderRadius: 16,
+    borderRadius: 14,
     padding: 16,
-    marginBottom: 16,
-    elevation: 2,
+    marginBottom: 10,
+    borderWidth: 1,
+    borderColor: "#e5e7eb",
   },
 
-  cardHeader: {
+  verificationCard: {
+    backgroundColor: "#ffffff",
+    borderRadius: 14,
+    padding: 16,
+    marginBottom: 10,
+    borderWidth: 1,
+    borderColor: "#fde68a",
+  },
+
+  top: {
     flexDirection: "row",
     alignItems: "flex-start",
-    marginBottom: 12,
   },
 
-  requestNumber: {
-    fontSize: 12,
-    color: "#6c7482",
-    fontWeight: "600",
-    marginBottom: 3,
-  },
-
-  requestTitle: {
-    fontSize: 18,
+  number: {
+    fontSize: 11,
     fontWeight: "700",
-    color: "#172033",
+    color: "#2563eb",
+    marginBottom: 5,
   },
 
-  priorityBadge: {
+  cardTitle: {
+    fontSize: 16,
+    fontWeight: "700",
+    color: "#111827",
+  },
+
+  row: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginTop: 14,
+  },
+
+  machine: {
+    flex: 1,
+    marginLeft: 10,
+    textAlign: "right",
+    fontSize: 11,
+    color: "#6b7280",
+  },
+
+  badge: {
     paddingHorizontal: 9,
     paddingVertical: 5,
-    borderRadius: 8,
-    marginLeft: 10,
+    borderRadius: 20,
   },
 
   badgeText: {
-    color: "#ffffff",
-    fontSize: 11,
+    fontSize: 9,
     fontWeight: "800",
+    color: "#ffffff",
   },
 
   critical: {
-    backgroundColor: "#c62828",
+    backgroundColor: "#dc2626",
   },
 
   high: {
-    backgroundColor: "#e66a00",
+    backgroundColor: "#ea580c",
   },
 
   medium: {
-    backgroundColor: "#c89500",
+    backgroundColor: "#ca8a04",
   },
 
   low: {
-    backgroundColor: "#4d7c0f",
+    backgroundColor: "#16a34a",
   },
 
-  infoRow: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    paddingVertical: 8,
-    borderTopWidth: 1,
-    borderTopColor: "#eef1f5",
+  pending: {
+    backgroundColor: "#6b7280",
   },
 
-  infoLabel: {
-    color: "#6c7482",
-    fontSize: 13,
+  validating: {
+    backgroundColor: "#0284c7",
   },
 
-  infoValue: {
-    color: "#172033",
-    fontSize: 13,
-    fontWeight: "600",
-    maxWidth: "65%",
-    textAlign: "right",
+  awaiting: {
+    backgroundColor: "#ca8a04",
   },
 
-  statusBadge: {
-    paddingHorizontal: 9,
-    paddingVertical: 5,
-    borderRadius: 8,
-  },
-
-  statusText: {
-    color: "#ffffff",
-    fontSize: 11,
-    fontWeight: "700",
+  approved: {
+    backgroundColor: "#16a34a",
   },
 
   assigned: {
@@ -1220,18 +1092,22 @@ const styles = StyleSheet.create({
   },
 
   accepted: {
-    backgroundColor: "#7c3aed",
+    backgroundColor: "#4f46e5",
   },
 
   inProgress: {
     backgroundColor: "#0891b2",
   },
 
-  verification: {
-    backgroundColor: "#d97706",
+  onHold: {
+    backgroundColor: "#ca8a04",
   },
 
-  completed: {
+  verification: {
+    backgroundColor: "#7c3aed",
+  },
+
+  closed: {
     backgroundColor: "#16a34a",
   },
 
@@ -1239,134 +1115,90 @@ const styles = StyleSheet.create({
     backgroundColor: "#dc2626",
   },
 
-  defaultStatus: {
-    backgroundColor: "#64748b",
-  },
-
-  evidenceSection: {
+  evidence: {
     marginTop: 16,
+    paddingTop: 14,
+    borderTopWidth: 1,
+    borderTopColor: "#e5e7eb",
   },
 
-  sectionTitle: {
-    fontSize: 16,
-    fontWeight: "700",
-    color: "#172033",
+  evidenceHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
     marginBottom: 10,
   },
 
-  evidenceContainer: {
-    width: 180,
-    marginRight: 12,
+  evidenceTitle: {
+    fontSize: 14,
+    fontWeight: "800",
+    color: "#111827",
   },
 
-  evidenceImage: {
-    width: 180,
-    height: 135,
-    borderRadius: 12,
+  evidenceItem: {
+    width: 150,
+    marginRight: 10,
+  },
+
+  image: {
+    width: 150,
+    height: 115,
+    borderRadius: 10,
     backgroundColor: "#e5e7eb",
   },
 
-  imagePlaceholder: {
-    width: 180,
-    height: 135,
-    borderRadius: 12,
-    backgroundColor: "#e5e7eb",
-    justifyContent: "center",
+  placeholder: {
     alignItems: "center",
+    justifyContent: "center",
   },
 
-  placeholderText: {
-    color: "#6c7482",
-    fontSize: 12,
-  },
-
-  evidenceFileName: {
-    color: "#6c7482",
-    fontSize: 11,
+  fileName: {
+    fontSize: 10,
+    color: "#6b7280",
     marginTop: 5,
   },
 
-  verificationBox: {
-    marginTop: 16,
-    padding: 14,
-    borderRadius: 12,
-    backgroundColor: "#fff7ed",
+  noEvidence: {
+    marginTop: 14,
+    padding: 11,
+    borderRadius: 8,
+    backgroundColor: "#f9fafb",
     borderWidth: 1,
-    borderColor: "#fed7aa",
-  },
-
-  verificationTitle: {
-    color: "#9a3412",
-    fontSize: 15,
-    fontWeight: "700",
-  },
-
-  verificationText: {
-    color: "#7c2d12",
-    fontSize: 13,
-    lineHeight: 19,
-    marginTop: 5,
+    borderColor: "#e5e7eb",
   },
 
   verifyButton: {
+    height: 42,
+    marginTop: 16,
+    borderRadius: 9,
     backgroundColor: "#16a34a",
-    minHeight: 46,
-    borderRadius: 10,
     alignItems: "center",
     justifyContent: "center",
-    marginTop: 12,
   },
+  machineText: {
+  fontSize: 13,
+  color: "#666",
+  marginTop: 4,
+},  
 
-  buttonText: {
-    color: "#ffffff",
-    fontSize: 14,
-    fontWeight: "700",
-  },
-
-  completedBox: {
-    marginTop: 14,
-    padding: 12,
-    borderRadius: 10,
-    backgroundColor: "#dcfce7",
-  },
-
-  completedText: {
-    color: "#166534",
-    fontSize: 13,
-    fontWeight: "600",
-  },
-
-  emptyCard: {
+  empty: {
     backgroundColor: "#ffffff",
-    borderRadius: 16,
+    borderRadius: 14,
     padding: 30,
     alignItems: "center",
-    marginTop: 10,
+    marginTop: 5,
   },
 
   emptyTitle: {
-    fontSize: 18,
+    fontSize: 17,
     fontWeight: "700",
-    color: "#172033",
+    color: "#374151",
     marginBottom: 6,
   },
 
-  emptyText: {
-    color: "#6c7482",
+  muted: {
+    fontSize: 12,
+    color: "#6b7280",
+    marginTop: 6,
     textAlign: "center",
-    lineHeight: 20,
-  },
-
-  center: {
-    flex: 1,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: "#f5f7fa",
-  },
-
-  loadingText: {
-    marginTop: 12,
-    color: "#172033",
-    fontSize: 15,
   },
 });

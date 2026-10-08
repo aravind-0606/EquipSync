@@ -238,16 +238,19 @@ export default function CreateRequestScreen() {
 
       // Add creation log
       const {
-        error: logError,
-      } = await supabase
-        .from("service_logs")
-        .insert({
-          service_request_id: requestData.id,
-          action: "REQUEST_CREATED",
-          description:
-            "Service request created by Operations Manager.",
-          created_by: user.id,
-        });
+  error: logError,
+} = await supabase
+  .from("service_logs")
+  .insert({
+    service_request_id: requestData.id,
+    log_type: "NOTE",
+    message:
+      "Service request created by Operations Manager.",
+    created_by: user.id,
+    metadata: {
+      request_number: requestNumber,
+    },
+  });
 
       if (logError) {
         console.error(
